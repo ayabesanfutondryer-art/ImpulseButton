@@ -123,7 +123,15 @@ function renderHome() {
 
         let editBadgeHtml = '';
         if (isEditMode) {
-            editBadgeHtml = `<div class="edit-badge" onclick="handleEditClick(event, '${btn.id}')">✎</div>`;
+            editBadgeHtml = `
+                <div class="edit-badge" onclick="handleEditClick(event, '${btn.id}')">✎</div>
+                <div class="delete-badge" onclick="handleDeleteClick(event, '${btn.id}')">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                </div>
+            `;
         }
 
         // Text Only as requested
@@ -157,6 +165,14 @@ function renderHome() {
 window.handleEditClick = (e, id) => {
     e.stopPropagation(); // Prevent main button click
     navigateTo('add', id);
+};
+
+window.handleDeleteClick = (e, id) => {
+    e.stopPropagation();
+    if (confirm("本当にこの欲ボタンを削除しますか？")) {
+        Storage.deleteButton(id);
+        renderHome();
+    }
 };
 
 // Toggle Edit Mode
@@ -323,7 +339,8 @@ function setupButtonFlow(id) {
     flowMessage.textContent = button.message;
 }
 
-document.getElementById('btn-flow-next').addEventListener('click', () => {
+// "Tap anywhere" to go next
+document.getElementById('view-button-image').addEventListener('click', () => {
     // Transition to Message View
     views.buttonImage.classList.add('hidden');
     views.buttonMessage.classList.remove('hidden');
