@@ -339,6 +339,24 @@ body {
   position: relative;
 }
 
+.upload-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  /* Let clicks pass to input behind/above? No, input is z-index 5 above. */
+}
+
+.upload-placeholder span {
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+
 .file-input {
   position: absolute;
   inset: 0;
