@@ -4,8 +4,9 @@
 
 // --- IndexedDB Wrapper ---
 const DB_NAME = 'yoku_buttons_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // Upgraded for stats
 const STORE_NAME = 'buttons';
+const STATS_STORE = 'stats';
 
 const DB = {
     db: null,
@@ -27,6 +28,9 @@ const DB = {
                 const db = e.target.result;
                 if (!db.objectStoreNames.contains(STORE_NAME)) {
                     db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+                }
+                if (!db.objectStoreNames.contains(STATS_STORE)) {
+                    db.createObjectStore(STATS_STORE, { keyPath: 'key' });
                 }
             };
         });
@@ -108,6 +112,8 @@ const Storage = {
             ...input,
             id: Date.now().toString(),
             createdAt: Date.now(),
+            patienceCount: 0,
+            desireCount: 0,
         };
         const success = await DB.put(newButton);
         return success ? newButton : null;
@@ -126,6 +132,69 @@ const Storage = {
     },
     deleteButton: async (id) => {
         await DB.delete(id);
+    },
+
+    // --- Stats Methods ---
+    getStats: async () => {
+        const pReq = new Promise((resolve) => {
+            // We can't use DB.get directly for arbitrary keys easily with current wrapper or maybe we can?
+            // The wrapper DB.get is hardcoded to STORE_NAME. We should refactor DB wrapper or just use raw transaction here.
+            // Let's extend DB wrapper for generic usage or just do it here.
+            // For simplicity, let's add generic support or just do ad-hoc.
+            // Actually, DB.get is `store.get(id)`. STORE_NAME is hardcoded.
+            // Let's refactor DB wrapper slightly in a separate step or just copy paste logic here.
+            // To avoid too big changes, I'll access DB.db directly here.
+            if (!DB.db) { resolve({}); return; }
+            const tx = DB.db.transaction([STATS_STORE], 'readonly');
+            const store = tx.objectStore(STATS_STORE);
+            const reqPatience = store.get('patience');
+            const reqDesire = store.get('desire');
+
+            let patience = 0;
+            let desire = 0;
+
+            // Parallel wait not easy with pure IDB requests callbacks without promises.
+            // Let's cascade.
+            reqPatience.onsuccess = () => {
+                if (reqPatience.result) patience = reqPatience.result.value || 0;
+                reqDesire.onsuccess = () => {
+                    if (reqDesire.result) desire = reqDesire.result.value || 0;
+                    resolve({ patience, desire });
+                };
+            };
+            reqPatience.onerror = () => resolve({ patience: 0, desire: 0 }); // Fallback
+        });
+        return await pReq;
+    },
+
+    incrementStat: async (key) => {
+        // key: 'patience' or 'desire'
+        if (!DB.db) return;
+        const tx = DB.db.transaction([STATS_STORE], 'readwrite');
+        const store = tx.objectStore(STATS_STORE);
+
+        return new Promise((resolve) => {
+            const reqGet = store.get(key);
+            reqGet.onsuccess = () => {
+                let current = 0;
+                if (reqGet.result) current = reqGet.result.value || 0;
+                const newVal = current + 1;
+                store.put({ key: key, value: newVal });
+                resolve(newVal);
+            };
+            reqGet.onerror = () => resolve(0);
+        });
+    },
+
+    incrementButtonStat: async (id, type) => {
+        // type: 'patience' or 'desire'
+        const button = await Storage.getButton(id);
+        if (!button) return;
+
+        const key = type === 'patience' ? 'patienceCount' : 'desireCount';
+        button[key] = (button[key] || 0) + 1;
+
+        await Storage.updateButton(id, button);
     }
 };
 
@@ -172,6 +241,7 @@ async function navigateTo(viewId, data = null) {
     // View specific logic
     if (viewId === 'home') {
         await renderHome();
+        await renderHeaderStats();
     } else if (viewId === 'add') {
         if (data && typeof data === 'string') {
             await loadEditForm(data);
@@ -185,34 +255,51 @@ async function navigateTo(viewId, data = null) {
 
 // Render Home Grid
 async function renderHome() {
-    // Show spinner if needed? For now just wait.
-    const buttons = await Storage.getButtons();
-    homeContent.innerHTML = '';
+    try {
+        if (!homeContent) {
+            alert("Error: homeContent element not found");
+            return;
+        }
 
-    // Always create grid
-    const grid = document.createElement('div');
-    grid.className = 'grid-2';
+        // Show spinner if needed? For now just wait.
+        let buttons = [];
+        try {
+            buttons = await Storage.getButtons();
+        } catch (dbErr) {
+            console.error("DB Error", dbErr);
+            alert("データの取得に失敗しました: " + dbErr);
+            buttons = [];
+        }
 
-    // Render existing buttons
-    buttons.forEach((btn, index) => {
-        const btnEl = document.createElement('button');
-        // Cycle through color-0 to color-7
-        const colorClass = `color-${index % 8}`;
-        btnEl.className = `card-btn ${colorClass}`;
+        homeContent.innerHTML = '';
 
-        // Click handler logic
-        btnEl.onclick = (e) => {
+        // Always create grid
+        const grid = document.createElement('div');
+        grid.className = 'grid-2';
+
+        // Render existing buttons
+        buttons.forEach((btn, index) => {
+            const btnEl = document.createElement('button');
+            // Use stored color or fallback to index-based cycle
+            const colorIndex = (btn.colorIndex !== undefined && btn.colorIndex !== null)
+                ? btn.colorIndex
+                : (index % 8);
+            const colorClass = `color-${colorIndex}`;
+            btnEl.className = `card-btn ${colorClass}`;
+
+            // Click handler logic
+            btnEl.onclick = (e) => {
+                if (isEditMode) {
+                    // In edit mode, clicking the main button does nothing
+                } else {
+                    activeButtonId = btn.id;
+                    navigateTo('buttonImage', btn.id);
+                }
+            };
+
+            let editBadgeHtml = '';
             if (isEditMode) {
-                // In edit mode, clicking the main button does nothing
-            } else {
-                activeButtonId = btn.id;
-                navigateTo('buttonImage', btn.id);
-            }
-        };
-
-        let editBadgeHtml = '';
-        if (isEditMode) {
-            editBadgeHtml = `
+                editBadgeHtml = `
                 <div class="edit-badge" onclick="handleEditClick(event, '${btn.id}')">✎</div>
                 <div class="delete-badge" onclick="handleDeleteClick(event, '${btn.id}')">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -221,30 +308,47 @@ async function renderHome() {
                     </svg>
                 </div>
             `;
-        }
+            }
 
-        // Text Only as requested
-        btnEl.innerHTML = `
+            // Text Only as requested
+            btnEl.innerHTML = `
             ${editBadgeHtml}
             <span class="btn-text line-clamp-3">${escapeHtml(btn.name)}</span>
         `;
-        grid.appendChild(btnEl);
-    });
+            grid.appendChild(btnEl);
+        });
 
-    // Append "Add Button"
-    const addBtnEl = document.createElement('button');
-    addBtnEl.className = 'card-btn';
-    addBtnEl.style.background = 'rgba(255,255,255,0.1)';
-    addBtnEl.style.border = '2px dashed rgba(255,255,255,0.3)';
-    addBtnEl.style.boxShadow = 'none';
+        // Append "Add Button"
+        const addBtnEl = document.createElement('button');
+        addBtnEl.className = 'card-btn';
+        addBtnEl.style.background = 'rgba(255,255,255,0.1)';
+        addBtnEl.style.border = '2px dashed rgba(255,255,255,0.3)';
+        addBtnEl.style.boxShadow = 'none';
 
-    addBtnEl.onclick = () => navigateTo('add');
-    addBtnEl.innerHTML = `
+        addBtnEl.onclick = (e) => {
+            if (isEditMode) return; // Do not add in edit mode (bubbles to exit)
+            navigateTo('add');
+        };
+        addBtnEl.innerHTML = `
         <span style="font-size: 3rem; color: rgba(255,255,255,0.5); font-weight: bold;">+</span>
     `;
-    grid.appendChild(addBtnEl);
+        grid.appendChild(addBtnEl);
 
-    homeContent.appendChild(grid);
+        homeContent.appendChild(grid);
+    } catch (e) {
+        console.error("renderHome Fatality", e);
+        alert("表示エラー: " + e.message);
+    }
+}
+
+// Stats Renderer
+async function renderHeaderStats() {
+    const stats = await Storage.getStats();
+    const patienceEl = document.getElementById('stat-patience');
+    const desireEl = document.getElementById('stat-desire');
+
+    if (patienceEl) patienceEl.textContent = stats.patience;
+    if (desireEl) desireEl.textContent = stats.desire;
 }
 
 // Handle clicking the edit badge
@@ -262,9 +366,26 @@ window.handleDeleteClick = async (e, id) => {
 };
 
 // Toggle Edit Mode
-document.querySelector('.btn-settings').addEventListener('click', () => {
+// Toggle Edit Mode
+document.querySelector('.btn-settings').addEventListener('click', (e) => {
+    e.stopPropagation();
     isEditMode = !isEditMode;
     renderHome(); // renderHome is async but here we don't need to await it necessarily as it updates DOM
+});
+
+// Exit Edit Mode on outside click
+document.addEventListener('click', (e) => {
+    if (isEditMode) {
+        // If clicking on specific tools, do not exit.
+        // check closest for edit-badge or delete-badge
+        // also check btn-settings (handled by stopPropagation, but just in case)
+        if (e.target.closest('.edit-badge') || e.target.closest('.delete-badge') || e.target.closest('.btn-settings')) {
+            return;
+        }
+        // Otherwise exit edit mode
+        isEditMode = false;
+        renderHome();
+    }
 });
 
 
@@ -280,6 +401,19 @@ const countMessage = document.getElementById('count-message');
 const formTitle = document.querySelector('#view-add .header-title');
 
 let currentImageBase64 = null;
+let selectedColorIndex = 0;
+const colorOptions = document.querySelectorAll('.color-option');
+
+function updateColorSelectionUI(index) {
+    selectedColorIndex = index;
+    colorOptions.forEach(opt => {
+        if (parseInt(opt.dataset.color) === index) {
+            opt.classList.add('selected');
+        } else {
+            opt.classList.remove('selected');
+        }
+    });
+}
 
 function resetAddForm() {
     editingButtonId = null;
@@ -291,6 +425,9 @@ function resetAddForm() {
     uploadPlaceholder.classList.remove('hidden');
     countName.textContent = "0";
     countMessage.textContent = "0";
+    // Default color to 0 or random? Let's default to 0 for consistency, or random to inspire variety.
+    // User probably wants to choose, so default 0 is safe.
+    updateColorSelectionUI(0);
     hideErrors();
 }
 
@@ -317,6 +454,12 @@ async function loadEditForm(id) {
     } else {
         // Handle case if image missing?
     }
+
+
+    // Load color
+    const loadedColor = (button.colorIndex !== undefined && button.colorIndex !== null) ? button.colorIndex : 0;
+    updateColorSelectionUI(loadedColor);
+
     hideErrors();
 }
 
@@ -468,13 +611,15 @@ addForm.addEventListener('submit', async (e) => {
         result = await Storage.updateButton(editingButtonId, {
             name,
             message,
-            imageUrl: currentImageBase64
+            imageUrl: currentImageBase64,
+            colorIndex: selectedColorIndex
         });
     } else {
         result = await Storage.addButton({
             name,
             message,
-            imageUrl: currentImageBase64
+            imageUrl: currentImageBase64,
+            colorIndex: selectedColorIndex
         });
     }
 
@@ -511,20 +656,27 @@ const flowName = document.getElementById('flow-name');
 const flowMessage = document.getElementById('flow-message');
 
 async function setupButtonFlow(id) {
-    const button = await Storage.getButton(id); // Async
+    // Load Button Data
+    const button = await Storage.getButton(id); // Use id parameter
     if (!button) {
         navigateTo('home');
         return;
     }
 
-    activeButtonId = id;
+    // Populate Data
+    document.getElementById('flow-image').src = button.imageUrl || '';
+    document.getElementById('flow-name').textContent = button.name;
+    document.getElementById('flow-message').textContent = button.message;
 
-    // Setup Image View
-    flowImage.src = button.imageUrl;
+    // Populate Stats
+    const pCount = document.getElementById('flow-stat-patience');
+    const dCount = document.getElementById('flow-stat-desire');
+    // Ensure button.patienceCount/desireCount exist or default to 0
+    if (pCount) pCount.textContent = button.patienceCount || 0;
+    if (dCount) dCount.textContent = button.desireCount || 0;
 
-    // Setup Message View
-    flowName.textContent = button.name;
-    flowMessage.textContent = button.message;
+    // Reset Flow UI
+    views.buttonImage.classList.remove('hidden');
 }
 
 // "Tap anywhere" to go next
@@ -553,12 +705,20 @@ for (let btn of backButtons) {
 
 
 // Flow actions
-document.getElementById('btn-flow-do').addEventListener('click', () => {
-    // "Do it" -> Go back home? Or delete logic? For now just home.
+document.getElementById('btn-flow-do').addEventListener('click', async () => {
+    // "Do it" -> Desire
+    await Storage.incrementStat('desire');
+    if (activeButtonId) {
+        await Storage.incrementButtonStat(activeButtonId, 'desire');
+    }
     navigateTo('home');
 });
-document.getElementById('btn-flow-dont').addEventListener('click', () => {
-    // "Don't do it" -> Go back home
+document.getElementById('btn-flow-dont').addEventListener('click', async () => {
+    // "Don't do it" -> Patience
+    await Storage.incrementStat('patience');
+    if (activeButtonId) {
+        await Storage.incrementButtonStat(activeButtonId, 'patience');
+    }
     navigateTo('home');
 });
 document.getElementById('btn-flow-home').addEventListener('click', () => navigateTo('home'));
@@ -578,3 +738,11 @@ function escapeHtml(text) {
 window.navigateTo = navigateTo;
 // navigateTo('home'); // Removed direct call, use initApp
 initApp();
+
+// Color Selection Listeners
+colorOptions.forEach(opt => {
+    opt.addEventListener('click', () => {
+        const idx = parseInt(opt.dataset.color);
+        updateColorSelectionUI(idx);
+    });
+});
